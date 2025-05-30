@@ -81,12 +81,14 @@ class _ProfileState:
     self.log_dir = None
     self.create_perfetto_link = False
     self.create_perfetto_trace = False
+    self.run_xprof_server = False
     self.lock = threading.Lock()
 
   def reset(self):
     _profile_state.profile_session = None
     _profile_state.create_perfetto_link = False
     _profile_state.create_perfetto_trace = False
+    _profile_state.run_xprof_server = False
     _profile_state.log_dir = None
 
 
@@ -97,6 +99,7 @@ def start_trace(
     log_dir: os.PathLike | str,
     create_perfetto_link: bool = False,
     create_perfetto_trace: bool = False,
+    run_xprof_server: bool = False,
     profiler_options: ProfileOptions | None = None,
 ) -> None:
   """Starts a profiler trace.
@@ -123,6 +126,8 @@ def start_trace(
       Perfetto trace viewer UI (https://ui.perfetto.dev). The file will also be
       generated if ``create_perfetto_link`` is true. This could be useful if you
       want to generate a Perfetto-compatible trace without blocking the process.
+    run_xprof_server: A boolean which, if true, starts and prints a link to a
+      local xprof UI. The program will block until the server is killed.
     profiler_options: Profiler options to configure the profiler for collection.
   """
   with _profile_state.lock:
@@ -145,6 +150,7 @@ def start_trace(
     _profile_state.create_perfetto_trace = (
         create_perfetto_trace or create_perfetto_link)
     _profile_state.log_dir = str(log_dir)
+    _profile_state.run_xprof_server = run_xprof_server
 
 
 def _write_perfetto_trace_file(log_dir: os.PathLike | str):
@@ -205,6 +211,16 @@ def _host_perfetto_trace_file(path: os.PathLike | str):
   finally:
     os.chdir(orig_directory)
 
+def _run_xprof_server(path: os.PathLike | str):
+  port = 8791
+  try:
+    from xprof.server import launch_server as launch_xprof_server
+    launch_xprof_server(path, port)
+  except ImportError:
+    print(
+        "Unable to start XProf, `tensorboard-plugin-profile` needs to be installed.")
+
+
 def stop_trace():
   """Stops the currently-running profiler trace.
 
@@ -220,6 +236,8 @@ def stop_trace():
       abs_filename = _write_perfetto_trace_file(_profile_state.log_dir)
       if _profile_state.create_perfetto_link:
         _host_perfetto_trace_file(abs_filename)
+    if _profile_state.run_xprof_server:
+      _run_xprof_server(_profile_state.log_dir)
     _profile_state.reset()
 
 
@@ -243,6 +261,7 @@ def trace(
     log_dir: os.PathLike | str,
     create_perfetto_link=False,
     create_perfetto_trace=False,
+    run_xprof_server=False,
     profiler_options: ProfileOptions | None = None,
 ):
   """Context manager to take a profiler trace.
@@ -267,10 +286,16 @@ def trace(
       Perfetto trace viewer UI (https://ui.perfetto.dev). The file will also be
       generated if ``create_perfetto_link`` is true. This could be useful if you
       want to generate a Perfetto-compatible trace without blocking the process.
+    run_xprof_server: A boolean which, if true, starts and prints a link to a
+      local xprof UI. The program will block until the server is killed.
     profiler_options: Profiler options to configure the profiler for collection.
   """
   start_trace(
-      log_dir, create_perfetto_link, create_perfetto_trace, profiler_options
+      log_dir,
+      create_perfetto_link,
+      create_perfetto_trace,
+      run_xprof_server,
+      profiler_options
   )
   try:
     yield

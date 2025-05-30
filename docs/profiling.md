@@ -131,14 +131,16 @@ alternative to `start_trace` and `stop_trace`:
 ```python
 import jax
 
-with jax.profiler.trace("/tmp/tensorboard"):
+with jax.profiler.trace("/tmp/tensorboard", run_xprof_server=True):
   key = jax.random.key(0)
   x = jax.random.normal(key, (5000, 5000))
   y = x @ x
   y.block_until_ready()
 ```
 
-To view the trace, first start TensorBoard if you haven't already:
+After this computation is done, the program will tell you the port that the
+XProf server is running on. When you visit the website, the XProf UI will
+load the profile.
 
 ```shell
 $ tensorboard --logdir=/tmp/tensorboard
