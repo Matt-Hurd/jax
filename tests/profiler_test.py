@@ -16,6 +16,8 @@ from functools import partial
 import glob
 import os
 import shutil
+import socket
+import subprocess
 import sys
 import tempfile
 import threading
@@ -23,6 +25,8 @@ import time
 import unittest
 from absl.testing import absltest
 import pathlib
+
+import urllib
 
 import jax
 import jax.numpy as jnp
@@ -44,11 +48,11 @@ except ImportError:
   profiler_client = None
   tf_profiler = None
 
-TBP_ENABLED = False
+XPROF_ENABLED = False
 try:
-  import tensorboard_plugin_profile
-  del tensorboard_plugin_profile
-  TBP_ENABLED = True
+  import xprof
+  del xprof
+  XPROF_ENABLED = True
 except ImportError:
   pass
 
@@ -296,7 +300,7 @@ class ProfilerTest(unittest.TestCase):
     self._check_xspace_pb_exist(logdir)
 
   @unittest.skipIf(
-      not (portpicker and profiler_client and tf_profiler and TBP_ENABLED),
+      not (portpicker and profiler_client and tf_profiler and XPROF_ENABLED),
     "Test requires tensorflow.profiler, portpicker and "
     "tensorboard_profile_plugin")
   def test_remote_profiler(self):
@@ -326,6 +330,75 @@ class ProfilerTest(unittest.TestCase):
       y = jnp.dot(y, y)
     jax.profiler.stop_server()
     thread_profiler.join()
+    self._check_xspace_pb_exist(logdir)
+
+  @unittest.skipIf(not XPROF_ENABLED, "Test requires xprof")
+  def test_profiler_server_with_xprof(self):
+    SEARCH_STR = "  Port: "
+    def monitor_stdout_for_port(proc_stdout, port_ref_list, event):
+        try:
+            for line in iter(proc_stdout.readline, ''):
+                print("DEBUG: " + line)
+                if SEARCH_STR in line:
+                    port_ref_list[0] = int(line[len(SEARCH_STR):])
+                    event.set()
+                    break
+            proc_stdout.close()
+        except Exception:
+            pass
+
+    profiler_service_port = portpicker.pick_unused_port()
+    jax.profiler.start_server(profiler_service_port)
+    start_time = time.time()
+
+    logdir = absltest.get_default_test_tmpdir()
+    cmd = [
+        sys.executable, "-m", "jax.collect_profile",
+        str(profiler_service_port), "500",
+        "--log_dir", logdir,
+        "--run_xprof_server"
+    ]
+    
+    xprof_port_ref = [None]
+    port_found_event = threading.Event()
+
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
+    monitor_thread = threading.Thread(target=monitor_stdout_for_port, args=(proc.stdout, xprof_port_ref, port_found_event))
+    monitor_thread.start()
+
+    y = jnp.zeros((5, 5))
+
+    while not xprof_port_ref[0]:
+      # The timeout here must be relatively high. The profiler takes a while to
+      # start up on Cloud TPUs.
+      if time.time() - start_time > 30:
+        raise RuntimeError("Profile did not complete in 30s")
+      y = jnp.dot(y, y)
+
+    # Wait for XProf port and check server
+    self.assertTrue(port_found_event.wait(timeout=20), "XProf server port not found in output within timeout.") # Increased timeout slightly
+    xprof_port = xprof_port_ref[0]
+    self.assertIsNotNone(xprof_port, "XProf port was not parsed.")
+
+    server_responded = False
+    try:
+        with urllib.request.urlopen(f"http://localhost:{xprof_port}", timeout=5) as response:
+            server_responded = (response.status == 200)
+    except (urllib.error.URLError, socket.timeout, ConnectionRefusedError):
+        pass # Let the assertion below fail
+    self.assertTrue(server_responded, f"XProf server on port {xprof_port} did not respond correctly.")
+
+    # Cleanup
+    if proc.poll() is None:
+        proc.terminate()
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=5)
+
+    monitor_thread.join(timeout=5)
+    jax.profiler.stop_server()
     self._check_xspace_pb_exist(logdir)
 
 if __name__ == "__main__":
